@@ -1,0 +1,3 @@
+name = Nuxeo Integration
+description = Nuxeo user and group integration for Drupal
+core = 7.x

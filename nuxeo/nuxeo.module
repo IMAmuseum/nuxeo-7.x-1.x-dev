@@ -1,0 +1,306 @@
+<?php 
+
+function nuxeo_init() {
+	// dpm($_GET['q'], 'GET q');
+	
+	// rebuild nuxeo roles when viewing pages depending on them
+	// do this here in init instead of form_alter so that the roles are
+	// prepared for the form builds
+	if (in_array($_GET['q'], array('admin/people/permissions/roles', 'admin/people/create'))) {
+		_nuxeo_rebuild_roles();
+	}
+	if (preg_match('/user\/\d+\/edit/', $_GET['q'])) {
+		_nuxeo_rebuild_roles();
+	}
+}
+
+function nuxeo_permission() {
+	return array(
+		'nuxeo group' => array(
+		'title' => t('Nuxeo Group'), 
+		'description' => t('Assigned to roles that are groups in Nuxeo'),
+		),
+	);
+}
+
+function nuxeo_menu() {
+	return array(
+		'admin/config/system/nuxeo' => array(
+			'title' 			=> 'Nuxeo Integration Settings',
+			'description'		=> 'Manage settings for the Nuxeo server',
+			'page callback' 	=> 'drupal_get_form',
+			'page arguments' 	=> array('nuxeo_admin_form'),
+			'file' 				=> 'nuxeo.admin.inc',
+			'access arguments' 	=> array('administer site configuration'),
+		)
+	);
+}
+
+function nuxeo_form_alter(&$form, &$form_state, $form_id) {
+	// dpm($form_id, 'form id');
+	
+	if ($form_id == 'user_profile_form' || $form_id == 'user_register_form') {
+		// hide the nuxeo pass
+		hide($form['field_nuxeo_pass']);
+		
+		// add custom validator to encode nuxeo pass
+		$form['#validate'][] = '_nuxeo_user_profile_form_validate';
+		
+		// add custom javascript to bind email address to username if option is selected in config
+		if (variable_get('nuxeo_email_as_username', false)) {
+			$form['#attached']['js'][] = drupal_get_path('module', 'nuxeo') . '/js/user_form.js';
+		}
+	}
+	
+	if ($form_id == 'user_admin_permissions') {
+		$form['#submit'][] = 'nuxeo_admin_permissions_submit';
+	}
+}
+
+// custom submit function for form user_admin_permissions
+// ensures nuxeo groups are kept in sync
+function nuxeo_admin_permissions_submit($form, &$form_state) {
+	// each role name in this form needs to be checked for the nuxeo group
+	// permission.  this function fires after the normal submit and the role has
+	// already been updated in the drupal db. 
+	_nuxeo_add_db_info();
+	foreach ($form_state['values']['role_names'] as $rid => $role_name) {
+		// if nuxeo group perm isn't set, attempt to delete this group from nuxeo
+		if ($form_state['values'][$rid]['nuxeo group'] === 0) {
+			db_set_active('nuxeo');
+			db_query('DELETE FROM "user2group" WHERE "groupId" = :g', array(':g' => $role_name));
+			db_query('DELETE FROM "groups" WHERE "groupname" = :g', array(':g' => $role_name));
+			db_set_active();
+		}
+		
+		// if it is set, ensure all users with this role have the group mapping in nuxeo
+		else {
+			// get all users with this role
+			$result = db_query('SELECT * FROM {users_roles} WHERE "rid" = :rid', array(
+				':rid' => $rid
+			));
+			foreach ($result as $user_row) {
+				$user = user_load($user_row->uid);
+				db_set_active('nuxeo');
+				
+				// ensure this user is already in the nuxeo db
+				$user_result = db_query('SELECT * FROM "users" WHERE "username" = :u', array(
+					':u' => $user->name
+				));
+				db_set_active();
+				
+				// if the user isn't already in the nuxeo db, add them now that they are part
+				// of a group with nuxeo integration
+				if ($user_result->rowCount() <= 0) {
+					_nuxeo_add_user($user);
+				}
+				
+				// first remove any current mapping for this user and group
+				db_set_active('nuxeo');
+				db_query('DELETE FROM "user2group" WHERE "groupId" = :g AND "userId" = :u', array(
+					':g' => $role_name,
+					':u' => $user->name
+				));
+				
+				// create the new mapping
+				db_query('INSERT INTO "user2group" ("groupId", "userId") VALUES (:g, :u)', array(
+					':g' => $role_name,
+					':u' => $user->name
+				));
+				db_set_active();
+			}
+		}
+	}
+	// finally rebuild roles
+	_nuxeo_rebuild_roles();
+}
+
+function nuxeo_user_role_delete($role) {
+	// if this role has the 'nuxeo group' permission, remove it from the nuxeo group db
+	// TODO: Problem: Drupal deletes all the permissions from this role before firing this hook
+	
+	// for now just delete the group if it exists in nuxeo
+	_nuxeo_add_db_info();
+	db_set_active('nuxeo');
+	db_query('DELETE FROM "groups" WHERE "groupname" = :r', array(':r' => $role->name));
+	db_set_active();
+}
+
+function nuxeo_user_insert(&$edit, $account, $category) {
+	// if the user is active and a part of a nuxeo group, add them to the nuxeo db
+	if ($account->status > 0 && user_access('nuxeo group', $account)) {
+		_nuxeo_add_user($account);
+	}
+}
+
+function nuxeo_user_update(&$edit, $account, $category) {
+	// TODO: This approach doesn't work.  A new password is not always submitted when editing a user,
+	// however we expect a password to encode when we pass the account to _nuxeo_add_user.
+	// need to move the password encoding into here and hook_user_insert
+	// can't: the password is already mangled by the time it gets to the hook_user_ functions
+	
+	// remove this user from users and groups tables if in nuxeo db already
+	// start with a clean slate
+	_nuxeo_add_db_info();
+	db_set_active('nuxeo');
+	db_query('DELETE FROM "users" WHERE "username" = :u', array(':u' => $account->original->name));
+	db_query('DELETE FROM "user2group" WHERE "userId" = :u', array(':u' => $account->original->name));
+	db_set_active();
+	
+	// if the user is active and part of a nuxeo group, add them to the nuxeo db
+	if ($account->status > 0 && user_access('nuxeo group', $account)) {
+		_nuxeo_add_user($account);
+	}
+}
+
+function nuxeo_user_delete($account) {
+	// user is being deleted.  remove from nuxeo users and user2group tables
+	_nuxeo_add_db_info();
+	db_set_active('nuxeo');
+	db_query('DELETE FROM "users" WHERE "username" = :u', array(':u' => $account->name));
+	db_query('DELETE FROM "user2group" WHERE "userId" = :u', array(':u' => $account->name));
+	db_set_active();
+}
+
+function _nuxeo_user_profile_form_validate($form, &$form_state) {
+	// populate field_nuxeo_pass with the encoded password
+	if (!empty($form_state['values']['pass'])
+		&& $form_state['input']['pass']['pass1'] == $form_state['input']['pass']['pass2']) {
+		
+		$pass = _nuxeo_encode_pass($form_state['values']['pass']);
+		$form_state['values']['field_nuxeo_pass']['und'][0]['value'] = $pass;
+	}
+	
+	// if for some reason the nuxeo pass field is still empty (user created before module install)
+	// create a scrambled password (will have to be reset).  prevents inserting a null password
+	if (!isset($form_state['values']['field_nuxeo_pass']['und'][0]['value'])) {
+		$form_state['values']['field_nuxeo_pass']['und'][0]['value'] = _nuxeo_encode_pass(rand(100000, 999999));
+	}
+}
+
+function _nuxeo_rebuild_roles() {
+	// dpm('rebuilding roles');
+	
+	// get all the roles from drupal that have the nuxeo group permission
+	$roles = user_roles(FALSE, 'nuxeo group');
+	
+	// connect to the nuxeo db and retrieve the groups
+	_nuxeo_add_db_info();
+	db_set_active('nuxeo');
+	$result = db_query('SELECT * FROM "groups"');
+	db_set_active();
+	foreach($result as $group) {
+		$groups[] = $group;
+	}
+	
+	// check that every group has a matching role
+	foreach ($groups as $group) {
+		$role = user_role_load_by_name($group->groupname);
+		if (!$role) {
+			// role wasn't found in drupal, create it
+			$new_role = new stdClass();
+			$new_role->name = $group->groupname;
+			if (user_role_save($new_role)) {
+				// assign 'nuxeo group' permission
+				user_role_grant_permissions($new_role->rid, array('nuxeo group'));
+			}
+		}
+		else {
+			// role was found, ensure 'nuxeo group' permission is set
+			$perms = user_role_permissions(array($role->rid => ''));
+			if (!array_key_exists('nuxeo group', $perms[$role->rid])) {
+				user_role_grant_permissions($role->rid, array('nuxeo group'));
+			}
+		}
+	}
+	
+	// check that every role has a matching group
+	foreach ($roles as $role) {
+		$matched = FALSE;
+		foreach ($groups as $group) {
+			if ($group->groupname == $role) $matched = TRUE;
+		}
+		if (!$matched) {
+			// create the group in the nuxeo db
+			db_set_active('nuxeo');
+			db_query('INSERT INTO "groups" ("groupname", "description") VALUES (:g, :d)', array(
+				':g' => $role,
+				':d' => ''
+			));
+			db_set_active();
+		}
+	}
+}
+
+function _nuxeo_add_db_info() {
+	// set up secondary db connection for nuxeo
+	$db_driver = variable_get('nuxeo_db_driver', '');
+	$db_host = variable_get('nuxeo_db_host', '');
+	$db_name = variable_get('nuxeo_db_name', '');
+	$db_user = variable_get('nuxeo_db_user', '');
+	$db_pass = variable_get('nuxeo_db_pass', '');
+	if (!empty($db_driver) && !empty($db_host) && !empty($db_name) && !empty($db_user) && !empty($db_pass)) {
+		Database::addConnectionInfo('nuxeo', 'default', array(
+				'database' => $db_name,
+				'username' => $db_user,
+				'password' => $db_pass,
+				'host' => $db_host,
+				'driver' => $db_driver,
+		));
+	}
+}
+
+function _nuxeo_encode_pass($pass, $salt = NULL) {
+	// generate an 8 byte salt
+	if (!$salt)	$salt = rand('11111111', '99999999');
+	
+	// generate a binary sha1 hash using salt appended to pass
+	$sha1 = sha1($pass.$salt, TRUE);
+	
+	// append the salt to the sha1 hash
+	$combo = $sha1.$salt;
+	
+	// base 64 encode the hash/salt combination
+	$encoded = base64_encode($combo);
+	
+	// prepend the algo information
+	$nuxeo_pass = '{SSHA}'.$encoded;
+	
+	return $nuxeo_pass;
+}
+
+function _nuxeo_add_user($account) {
+	// don't ever add the system accounts
+	if ($account->uid <= 1) return;
+	
+	_nuxeo_add_db_info();
+	db_set_active('nuxeo');
+	// add user to db
+	db_query('INSERT INTO "users" ("username", "lastName", "email", "company", "firstName", "password")'
+		.' VALUES (:u, :l, :e, :c, :f, :p)', array(
+		':u' 	=> $account->name,
+		':l'	=> '',
+		':e' 	=> $account->mail,
+		':c'	=> '',
+		':f'	=> $account->name,
+		':p'	=> $account->field_nuxeo_pass['und'][0]['value']
+	));
+	db_set_active();
+	
+	// add user to groups join table
+	foreach($account->roles as $rid => $rval) {
+		// determine if this role is a nuxeo group
+		$roles = user_role_permissions(array($rid => $rid));
+		if (isset($roles[$rid]['nuxeo group'])) {
+			// get the role for its name
+			$role = user_role_load($rid);
+			// add the join row
+			db_set_active('nuxeo');
+			db_query('INSERT INTO "user2group" ("groupId", "userId") VALUES (:g, :u)', array(
+				':g' => $role->name,
+				':u' => $account->name
+			));
+			db_set_active();
+		}
+	}
+}
