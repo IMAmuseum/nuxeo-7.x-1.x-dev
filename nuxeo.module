@@ -343,5 +343,5 @@ function _nuxeo_import_users() {
 		}
 	}
 	drupal_set_message($total_imported.' Nuxeo users imported.  These users are imported with Blocked status.  Please visit the '
-		.l('People admin page', 'users/admin/people/people').' to set these accounts active.', 'info');
+		.l('People admin page', 'admin/people').' to set these accounts active.', 'info');
 }
