@@ -37,6 +37,16 @@ function nuxeo_admin_form() {
 			'#title' => 'Force Email as Username',
 			'#description' => 'This setting forces newly created users to have their email address double as their username',
 			'#default_value' => variable_get('nuxeo_email_as_username', false)
+		),
+		'utilities' => array(
+			'#type' => 'fieldset',
+			'#title' => 'Utilities',
+			
+			'import' => array(
+				'#type' => 'submit',
+				'#value' => 'Import Nuxeo Users',
+				'#submit' => array('_nuxeo_import_users')
+			)
 		)
 	);
 

@@ -304,3 +304,44 @@ function _nuxeo_add_user($account) {
 		}
 	}
 }
+
+function _nuxeo_import_users() {
+	_nuxeo_rebuild_roles();
+	$email_as_username = variable_get('nuxeo_email_as_username', FALSE);
+	$total_imported = 0;
+	
+	// get all the users from the nuxeo table
+	_nuxeo_add_db_info();
+	db_set_active('nuxeo');
+	$n_user_result = db_query('SELECT * FROM "users"');
+	db_set_active();
+	foreach ($n_user_result as $n_user) {
+		// only operate on users with encoded passwords
+		if (substr($n_user->password, 0, 1) != "{") continue;
+		// test if pre-existing
+		$d_user_count = db_query('SELECT name FROM {users} u WHERE u.name = :name', array(':name' => $n_user->username))->rowCount();
+		if ($d_user_count === 0) {
+			// user doesn't exist, add to drupal
+			$account = new stdClass();
+			$account->is_new = TRUE;
+			$account->status = 0;
+			$account->name = $n_user->username;
+			$account->mail = $n_user->email;
+			// get this user's groups from nuxeo
+			db_set_active('nuxeo');
+			$n_user_groups_result = db_query('SELECT * FROM "user2group" WHERE "userId" = :name', array(':name' => $n_user->username));
+			db_set_active();
+			foreach ($n_user_groups_result as $n_user_group) {
+				// we need to load the matching drupal role in order to get the role id
+				$role = user_role_load_by_name($n_user_group->groupid);
+				if ($role) {
+					$account->roles[$role->rid] = $role->name;
+				}
+			}
+			user_save($account, array('pass' => user_password()));
+			$total_imported++;			
+		}
+	}
+	drupal_set_message($total_imported.' Nuxeo users imported.  These users are imported with Blocked status.  Please visit the '
+		.l('People admin page', 'users/admin/people/people').' to set these accounts active.', 'info');
+}
