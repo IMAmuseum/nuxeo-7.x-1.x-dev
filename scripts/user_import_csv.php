@@ -27,12 +27,16 @@ if (!$csv) {
 while ($line = fgetcsv($csv)) {
 	// print_r($line);
 	// ensure this user isn't already in the system
-	$exists = db_query('SELECT mail FROM {users} u WHERE u.mail = :mail',
-		array(':mail' => $line[2]))
-		->rowCount();
-	if ($exists > 0) {
-		print "Not re-adding existing user: {$line[0]} {$line[1]} - {$line[2]}\n";
-		continue;
+	$exists = db_query('SELECT * FROM {users} u WHERE u.mail = :mail',
+		array(':mail' => $line[2]));
+	foreach($exists as $existing_user) {
+		print "Not re-adding existing user: {$line[0]} {$line[1]} - {$line[2]} - resetting password\n";
+		$user = user_load($existing_user->uid);
+		if ($user) {
+			$user->field_nuxeo_pass['und'][0]['value'] = _nuxeo_encode_pass($line[3]);
+			user_save($user, array('pass' => $line[3]));
+		}
+		continue 2;
 	}
 	// assemble new user object
 	$account = new stdClass();
