@@ -273,9 +273,14 @@ function _nuxeo_add_user($account) {
 	// don't ever add the system accounts
 	if ($account->uid <= 1) return;
 	
+	// ensure password field is populated, if not randomize it
+	if (!isset($account->field_nuxeo_pass['und'][0]['value'])) {
+		$account->field_nuxeo_pass['und'][0]['value'] = _nuxeo_encode_pass(rand(11111, 99999));
+	}
+	
+	// add user to db
 	_nuxeo_add_db_info();
 	db_set_active('nuxeo');
-	// add user to db
 	db_query('INSERT INTO "users" ("username", "lastName", "email", "company", "firstName", "password")'
 		.' VALUES (:u, :l, :e, :c, :f, :p)', array(
 		':u' 	=> $account->name,
